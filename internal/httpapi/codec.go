@@ -83,6 +83,9 @@ func handleError(w http.ResponseWriter, r *http.Request, err error) {
 	case errors.Is(err, domain.ErrManifestBlocked):
 		status = http.StatusConflict
 		code = "manifest_preview_blocked"
+	case errors.Is(err, domain.ErrIdempotencyConflict):
+		status = http.StatusConflict
+		code = "idempotency_conflict"
 	}
 	var validation *domain.ValidationError
 	if errors.As(err, &validation) {

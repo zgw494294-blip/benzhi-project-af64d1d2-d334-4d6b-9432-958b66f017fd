@@ -43,8 +43,43 @@ func requireMeta(m Meta, roles ...string) error {
 	}
 	return domain.ErrForbidden
 }
-func (s *Service) prior(ctx context.Context, key string) (CommitResult, bool) {
-	return s.store.IdempotentResult(ctx, key)
+
+// priorOutcome summarizes a prior idempotency lookup. When Found is true the key
+// has already been used: Matching means the caller may safely replay the
+// stored result, while a mismatch means the key was reused by a different
+// operation or payload and the caller must surface a stable conflict without
+// executing, persisting events, or mutating the projection.
+type priorOutcome struct {
+	Result  CommitResult
+	Found   bool
+	Matching bool
+}
+
+// prior inspects the idempotency store for a key and compares the stored
+// fingerprint with the incoming request fingerprint. A matching fingerprint
+// authorizes result replay; a mismatch must produce ErrIdempotencyConflict.
+func (s *Service) prior(ctx context.Context, key string, fp RequestFingerprint) priorOutcome {
+	result, found := s.store.IdempotentResult(ctx, key)
+	if !found {
+		return priorOutcome{}
+	}
+	if result.Fingerprint.Operation != fp.Operation || result.Fingerprint.PayloadDigest != fp.PayloadDigest {
+		return priorOutcome{Result: result, Found: true, Matching: false}
+	}
+	return priorOutcome{Result: result, Found: true, Matching: true}
+}
+
+// replayOrConflict converts a priorOutcome into a service-level decision. It
+// returns the stored result for matching retries and ErrIdempotencyConflict
+// for key reuse with divergent operation or payload.
+func (p priorOutcome) replayOrConflict() (CommitResult, bool, error) {
+	if !p.Found {
+		return CommitResult{}, false, nil
+	}
+	if !p.Matching {
+		return CommitResult{}, false, domain.ErrIdempotencyConflict
+	}
+	return p.Result, true, nil
 }
 func getJob(snap Snapshot, id string) (domain.DigitizationJob, error) {
 	v, ok := snap.Jobs[id]
@@ -59,8 +94,13 @@ func (s *Service) CreateJob(ctx context.Context, c CreateJobCommand) (CommitResu
 	if err := requireMeta(c.Meta, "operator", "reviewer", "manager"); err != nil {
 		return CommitResult{}, err
 	}
-	if prior, ok := s.prior(ctx, c.IdempotencyKey); ok {
-		return prior, nil
+	fp := Fingerprint("create_job", struct {
+		Title, CollectionRef string
+		Profile              domain.CaptureProfile
+	}{c.Title, c.CollectionRef, c.Profile})
+	if outcome := s.prior(ctx, c.IdempotencyKey, fp); outcome.Found {
+		result, _, err := outcome.replayOrConflict()
+		return result, err
 	}
 	if strings.TrimSpace(c.Title) == "" {
 		return CommitResult{}, domain.Invalid("title", "不能为空")
@@ -74,7 +114,7 @@ func (s *Service) CreateJob(ctx context.Context, c CreateJobCommand) (CommitResu
 	now := s.clock.Now()
 	id := s.ids.NewID("job")
 	job := domain.DigitizationJob{ID: id, Title: c.Title, CollectionRef: c.CollectionRef, Status: domain.StatusDraft, CaptureProfile: c.Profile, Version: 1, CreatedAt: now, UpdatedAt: now}
-	r := CommitResult{JobID: id, Version: 1, Status: job.Status, ResourceID: id}
+	r := CommitResult{JobID: id, Version: 1, Status: job.Status, ResourceID: id, Fingerprint: fp}
 	return s.store.Commit(ctx, id, 0, c.IdempotencyKey, []Event{NewEvent("job.created", id, c.Actor, now, job)}, r)
 }
 
@@ -82,8 +122,16 @@ func (s *Service) AddCarrier(ctx context.Context, c AddCarrierCommand) (CommitRe
 	if err := requireMeta(c.Meta, "operator"); err != nil {
 		return CommitResult{}, err
 	}
-	if p, ok := s.prior(ctx, c.IdempotencyKey); ok {
-		return p, nil
+	fp := Fingerprint("add_carrier", struct {
+		JobID, CarrierCode, Format string
+		ExpectedDurationMS         int64
+		ConditionGrade             string
+		CleaningRequired           bool
+		AssessmentNote             string
+	}{c.JobID, c.CarrierCode, c.Format, c.ExpectedDurationMS, c.ConditionGrade, c.CleaningRequired, c.AssessmentNote})
+	if outcome := s.prior(ctx, c.IdempotencyKey, fp); outcome.Found {
+		result, _, err := outcome.replayOrConflict()
+		return result, err
 	}
 	snap := s.store.Snapshot(ctx)
 	job, err := getJob(snap, c.JobID)
@@ -113,7 +161,7 @@ func (s *Service) AddCarrier(ctx context.Context, c AddCarrierCommand) (CommitRe
 		events = append(events, NewEvent("preflight.invalidated", c.JobID, c.Actor, job.UpdatedAt, struct{}{}))
 	}
 	events = append(events, NewEvent("job.status_changed", c.JobID, c.Actor, job.UpdatedAt, job))
-	r := CommitResult{JobID: c.JobID, Version: job.Version, Status: job.Status, ResourceID: carrier.ID}
+	r := CommitResult{JobID: c.JobID, Version: job.Version, Status: job.Status, ResourceID: carrier.ID, Fingerprint: fp}
 	return s.store.Commit(ctx, c.JobID, c.ExpectedVersion, c.IdempotencyKey, events, r)
 }
 
@@ -121,8 +169,15 @@ func (s *Service) CompletePreflight(ctx context.Context, c CompletePreflightComm
 	if err := requireMeta(c.Meta, "operator"); err != nil {
 		return CommitResult{}, err
 	}
-	if p, ok := s.prior(ctx, c.IdempotencyKey); ok {
-		return p, nil
+	fp := Fingerprint("complete_preflight", struct {
+		JobID                                string
+		PlaybackCalibrated, StorageAvailable bool
+		CarrierChecks                        []CarrierPreflightInput
+		CarrierCleaned                       bool
+	}{c.JobID, c.PlaybackCalibrated, c.StorageAvailable, c.CarrierChecks, c.CarrierCleaned})
+	if outcome := s.prior(ctx, c.IdempotencyKey, fp); outcome.Found {
+		result, _, err := outcome.replayOrConflict()
+		return result, err
 	}
 	snap := s.store.Snapshot(ctx)
 	job, err := getJob(snap, c.JobID)
@@ -166,7 +221,7 @@ func (s *Service) CompletePreflight(ctx context.Context, c CompletePreflightComm
 		Check domain.PreflightCheck `json:"check"`
 	}{c.JobID, check}
 	events := []Event{NewEvent("preflight.completed", c.JobID, c.Actor, check.CheckedAt, data), NewEvent("job.status_changed", c.JobID, c.Actor, check.CheckedAt, job)}
-	r := CommitResult{JobID: c.JobID, Version: job.Version, Status: job.Status, Preflight: &check}
+	r := CommitResult{JobID: c.JobID, Version: job.Version, Status: job.Status, Preflight: &check, Fingerprint: fp}
 	return s.store.Commit(ctx, c.JobID, c.ExpectedVersion, c.IdempotencyKey, events, r)
 }
 
@@ -233,8 +288,15 @@ func (s *Service) RegisterCapture(ctx context.Context, c RegisterCaptureCommand)
 	if err := requireMeta(c.Meta, "operator"); err != nil {
 		return CommitResult{}, err
 	}
-	if p, ok := s.prior(ctx, c.IdempotencyKey); ok {
-		return p, nil
+	fp := Fingerprint("register_capture", struct {
+		JobID, CarrierID, SHA256, Operator, SupersedesID, ContentSummary, ResolutionNote string
+		SampleRate, BitDepth, Channels                                                   int
+		DurationMS                                                                       int64
+		Metrics                                                                          domain.CaptureMetrics
+	}{c.JobID, c.CarrierID, c.SHA256, c.Operator, c.SupersedesID, c.ContentSummary, c.ResolutionNote, c.SampleRate, c.BitDepth, c.Channels, c.DurationMS, c.Metrics})
+	if outcome := s.prior(ctx, c.IdempotencyKey, fp); outcome.Found {
+		result, _, err := outcome.replayOrConflict()
+		return result, err
 	}
 	snap := s.store.Snapshot(ctx)
 	job, err := getJob(snap, c.JobID)
@@ -333,7 +395,7 @@ func (s *Service) RegisterCapture(ctx context.Context, c RegisterCaptureCommand)
 	job.Version++
 	job.UpdatedAt = now
 	events = append(events, NewEvent("job.status_changed", c.JobID, c.Actor, now, job))
-	r := CommitResult{JobID: c.JobID, Version: job.Version, Status: job.Status, ResourceID: take.ID}
+	r := CommitResult{JobID: c.JobID, Version: job.Version, Status: job.Status, ResourceID: take.ID, Fingerprint: fp}
 	return s.store.Commit(ctx, c.JobID, c.ExpectedVersion, c.IdempotencyKey, events, r)
 }
 
@@ -341,8 +403,12 @@ func (s *Service) VoidCapture(ctx context.Context, c VoidCaptureCommand) (Commit
 	if err := requireMeta(c.Meta, "operator"); err != nil {
 		return CommitResult{}, err
 	}
-	if p, ok := s.prior(ctx, c.IdempotencyKey); ok {
-		return p, nil
+	fp := Fingerprint("void_capture", struct {
+		JobID, CaptureID, Reason string
+	}{c.JobID, c.CaptureID, c.Reason})
+	if outcome := s.prior(ctx, c.IdempotencyKey, fp); outcome.Found {
+		result, _, err := outcome.replayOrConflict()
+		return result, err
 	}
 	snap := s.store.Snapshot(ctx)
 	job, err := getJob(snap, c.JobID)
@@ -373,7 +439,7 @@ func (s *Service) VoidCapture(ctx context.Context, c VoidCaptureCommand) (Commit
 	job.Version++
 	job.UpdatedAt = now
 	events := []Event{NewEvent("capture.voided", c.JobID, c.Actor, now, take), NewEvent("job.status_changed", c.JobID, c.Actor, now, job)}
-	r := CommitResult{JobID: c.JobID, Version: job.Version, Status: job.Status, ResourceID: take.ID}
+	r := CommitResult{JobID: c.JobID, Version: job.Version, Status: job.Status, ResourceID: take.ID, Fingerprint: fp}
 	return s.store.Commit(ctx, c.JobID, c.ExpectedVersion, c.IdempotencyKey, events, r)
 }
 
@@ -381,8 +447,15 @@ func (s *Service) AddManualFinding(ctx context.Context, c AddFindingCommand) (Co
 	if err := requireMeta(c.Meta, "reviewer"); err != nil {
 		return CommitResult{}, err
 	}
-	if p, ok := s.prior(ctx, c.IdempotencyKey); ok {
-		return p, nil
+	fp := Fingerprint("add_finding", struct {
+		JobID, CaptureTakeID string
+		Severity             domain.Severity
+		StartMS, EndMS       int64
+		Description          string
+	}{c.JobID, c.CaptureTakeID, c.Severity, c.StartMS, c.EndMS, c.Description})
+	if outcome := s.prior(ctx, c.IdempotencyKey, fp); outcome.Found {
+		result, _, err := outcome.replayOrConflict()
+		return result, err
 	}
 	snap := s.store.Snapshot(ctx)
 	job, err := getJob(snap, c.JobID)
@@ -410,7 +483,7 @@ func (s *Service) AddManualFinding(ctx context.Context, c AddFindingCommand) (Co
 	job.Version++
 	job.UpdatedAt = now
 	events := []Event{NewEvent("finding.created", c.JobID, c.Actor, now, f), NewEvent("job.status_changed", c.JobID, c.Actor, now, job)}
-	r := CommitResult{JobID: c.JobID, Version: job.Version, Status: job.Status, ResourceID: f.ID}
+	r := CommitResult{JobID: c.JobID, Version: job.Version, Status: job.Status, ResourceID: f.ID, Fingerprint: fp}
 	return s.store.Commit(ctx, c.JobID, c.ExpectedVersion, c.IdempotencyKey, events, r)
 }
 
@@ -418,8 +491,14 @@ func (s *Service) ReviewFinding(ctx context.Context, c ReviewFindingCommand) (Co
 	if err := requireMeta(c.Meta, "reviewer"); err != nil {
 		return CommitResult{}, err
 	}
-	if p, ok := s.prior(ctx, c.IdempotencyKey); ok {
-		return p, nil
+	fp := Fingerprint("review_finding", struct {
+		JobID, FindingID, Decision, ResolutionNote string
+		CarrierID, CaptureTakeID                   string
+		RemediationRound                           int
+	}{c.JobID, c.FindingID, c.Decision, c.ResolutionNote, c.CarrierID, c.CaptureTakeID, c.RemediationRound})
+	if outcome := s.prior(ctx, c.IdempotencyKey, fp); outcome.Found {
+		result, _, err := outcome.replayOrConflict()
+		return result, err
 	}
 	snap := s.store.Snapshot(ctx)
 	job, err := getJob(snap, c.JobID)
@@ -504,7 +583,7 @@ func (s *Service) ReviewFinding(ctx context.Context, c ReviewFindingCommand) (Co
 	job.Version++
 	job.UpdatedAt = now
 	events := []Event{NewEvent("finding.reviewed", c.JobID, c.Actor, now, f), NewEvent("job.status_changed", c.JobID, c.Actor, now, job)}
-	r := CommitResult{JobID: c.JobID, Version: job.Version, Status: job.Status, ResourceID: f.ID}
+	r := CommitResult{JobID: c.JobID, Version: job.Version, Status: job.Status, ResourceID: f.ID, Fingerprint: fp}
 	return s.store.Commit(ctx, c.JobID, c.ExpectedVersion, c.IdempotencyKey, events, r)
 }
 
@@ -512,8 +591,12 @@ func (s *Service) SubmitApproval(ctx context.Context, c SubmitApprovalCommand) (
 	if err := requireMeta(c.Meta, "reviewer"); err != nil {
 		return CommitResult{}, err
 	}
-	if p, ok := s.prior(ctx, c.IdempotencyKey); ok {
-		return p, nil
+	fp := Fingerprint("submit_approval", struct {
+		JobID string
+	}{c.JobID})
+	if outcome := s.prior(ctx, c.IdempotencyKey, fp); outcome.Found {
+		result, _, err := outcome.replayOrConflict()
+		return result, err
 	}
 	snap := s.store.Snapshot(ctx)
 	job, err := getJob(snap, c.JobID)
@@ -536,7 +619,7 @@ func (s *Service) SubmitApproval(ctx context.Context, c SubmitApprovalCommand) (
 	job.Version++
 	job.UpdatedAt = now
 	events := []Event{NewEvent("job.status_changed", c.JobID, c.Actor, now, job)}
-	r := CommitResult{JobID: c.JobID, Version: job.Version, Status: job.Status}
+	r := CommitResult{JobID: c.JobID, Version: job.Version, Status: job.Status, Fingerprint: fp}
 	return s.store.Commit(ctx, c.JobID, c.ExpectedVersion, c.IdempotencyKey, events, r)
 }
 
@@ -544,8 +627,16 @@ func (s *Service) FreezeManifest(ctx context.Context, c FreezeManifestCommand) (
 	if err := requireMeta(c.Meta, "manager"); err != nil {
 		return CommitResult{}, err
 	}
-	if p, ok := s.prior(ctx, c.IdempotencyKey); ok {
-		return p, nil
+	fp := Fingerprint("freeze_manifest", struct {
+		JobID            string
+		PreviewVersion   int64
+		PreviewDigest    string
+		PreflightVersion int64
+		PreflightDigest  string
+	}{c.JobID, c.PreviewVersion, c.PreviewDigest, c.PreflightVersion, c.PreflightDigest})
+	if outcome := s.prior(ctx, c.IdempotencyKey, fp); outcome.Found {
+		result, _, err := outcome.replayOrConflict()
+		return result, err
 	}
 	snap := s.store.Snapshot(ctx)
 	job, err := getJob(snap, c.JobID)
@@ -589,7 +680,7 @@ func (s *Service) FreezeManifest(ctx context.Context, c FreezeManifestCommand) (
 	job.Version++
 	job.UpdatedAt = now
 	events := []Event{NewEvent("manifest.frozen", c.JobID, c.Actor, now, manifest), NewEvent("job.status_changed", c.JobID, c.Actor, now, job)}
-	r := CommitResult{JobID: c.JobID, Version: job.Version, Status: job.Status, ResourceID: manifest.ID}
+	r := CommitResult{JobID: c.JobID, Version: job.Version, Status: job.Status, ResourceID: manifest.ID, Fingerprint: fp}
 	return s.store.Commit(ctx, c.JobID, c.ExpectedVersion, c.IdempotencyKey, events, r)
 }
 
@@ -597,8 +688,12 @@ func (s *Service) IssueCertificate(ctx context.Context, c IssueCertificateComman
 	if err := requireMeta(c.Meta, "manager"); err != nil {
 		return CommitResult{}, err
 	}
-	if p, ok := s.prior(ctx, c.IdempotencyKey); ok {
-		return p, nil
+	fp := Fingerprint("issue_certificate", struct {
+		JobID string
+	}{c.JobID})
+	if outcome := s.prior(ctx, c.IdempotencyKey, fp); outcome.Found {
+		result, _, err := outcome.replayOrConflict()
+		return result, err
 	}
 	snap := s.store.Snapshot(ctx)
 	job, err := getJob(snap, c.JobID)
@@ -628,6 +723,6 @@ func (s *Service) IssueCertificate(ctx context.Context, c IssueCertificateComman
 	job.Version++
 	job.UpdatedAt = now
 	events := []Event{NewEvent("certificate.issued", c.JobID, c.Actor, now, cert), NewEvent("job.status_changed", c.JobID, c.Actor, now, job)}
-	r := CommitResult{JobID: c.JobID, Version: job.Version, Status: job.Status, ResourceID: cert.CertificateNo}
+	r := CommitResult{JobID: c.JobID, Version: job.Version, Status: job.Status, ResourceID: cert.CertificateNo, Fingerprint: fp}
 	return s.store.Commit(ctx, c.JobID, c.ExpectedVersion, c.IdempotencyKey, events, r)
 }

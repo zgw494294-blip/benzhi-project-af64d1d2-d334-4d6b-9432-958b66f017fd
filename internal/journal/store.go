@@ -98,7 +98,11 @@ func (s *Store) replay() error {
 				return fmt.Errorf("重建投影失败: %w", err)
 			}
 		}
-		s.idempotency[f.IdempotencyKey] = f.Result
+		stored := f.Result
+		if f.Fingerprint != nil {
+			stored.Fingerprint = *f.Fingerprint
+		}
+		s.idempotency[f.IdempotencyKey] = stored
 		seq = f.Sequence
 		previous = f.Checksum
 	}
@@ -126,7 +130,10 @@ func (s *Store) Commit(_ context.Context, jobID string, expected int64, key stri
 		return application.CommitResult{}, errors.New("事件日志已经关闭")
 	}
 	if prior, ok := s.idempotency[key]; ok {
-		return prior, nil
+		if prior.Fingerprint.Operation == result.Fingerprint.Operation && prior.Fingerprint.PayloadDigest == result.Fingerprint.PayloadDigest {
+			return prior, nil
+		}
+		return application.CommitResult{}, fmt.Errorf("%w: 幂等键 %s 已被不同操作或载荷占用", domain.ErrIdempotencyConflict, key)
 	}
 	current := int64(0)
 	if job, ok := s.projection.Jobs[jobID]; ok {
@@ -135,7 +142,7 @@ func (s *Store) Commit(_ context.Context, jobID string, expected int64, key stri
 	if current != expected {
 		return application.CommitResult{}, fmt.Errorf("%w: 当前版本 %d，期望版本 %d", domain.ErrConflict, current, expected)
 	}
-	f := frame{SchemaVersion: schemaVersion, Sequence: s.sequence + 1, PreviousDigest: s.lastDigest, CommittedAt: time.Now().UTC(), JobID: jobID, IdempotencyKey: key, Events: events, Result: result}
+	f := frame{SchemaVersion: schemaVersion, Sequence: s.sequence + 1, PreviousDigest: s.lastDigest, CommittedAt: time.Now().UTC(), JobID: jobID, IdempotencyKey: key, Events: events, Result: result, Fingerprint: &result.Fingerprint}
 	if err := f.seal(); err != nil {
 		return application.CommitResult{}, err
 	}

@@ -19,6 +19,7 @@ type frame struct {
 	IdempotencyKey string                   `json:"idempotencyKey"`
 	Events         []application.Event      `json:"events"`
 	Result         application.CommitResult `json:"result"`
+	Fingerprint    *application.RequestFingerprint `json:"fingerprint,omitempty"`
 	Checksum       string                   `json:"checksum"`
 }
 

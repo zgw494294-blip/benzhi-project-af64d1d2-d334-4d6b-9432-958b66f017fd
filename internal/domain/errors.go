@@ -16,6 +16,7 @@ var (
 	ErrLineageConflict    = errors.New("采集版本谱系冲突")
 	ErrStalePreview       = errors.New("冻结预检已经过期，请重新预检")
 	ErrManifestBlocked    = errors.New("冻结预检仍有阻断项")
+	ErrIdempotencyConflict = errors.New("幂等键已被不同操作或载荷占用")
 )
 
 type ValidationError struct {
