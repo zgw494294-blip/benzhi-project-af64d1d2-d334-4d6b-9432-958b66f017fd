@@ -192,7 +192,7 @@ func (s *Service) ManifestPreview(ctx context.Context, jobID string) (domain.Man
 	cached, ok := s.manifestCache[jobID]
 	s.previewMu.RUnlock()
 	if ok && cached.jobVersion == job.Version {
-		return cached.preview, nil
+		return cloneManifestPreview(cached.preview), nil
 	}
 	revision := 1
 	if old, exists := snap.Manifests[jobID]; exists {
@@ -200,9 +200,26 @@ func (s *Service) ManifestPreview(ctx context.Context, jobID string) (domain.Man
 	}
 	preview := domain.BuildManifestPreview(job, snap.JobCarriers(jobID), snap.JobCaptures(jobID), snap.JobFindings(jobID), revision)
 	s.previewMu.Lock()
-	s.manifestCache[jobID] = cachedManifestPreview{jobVersion: job.Version, preview: preview}
+	s.manifestCache[jobID] = cachedManifestPreview{jobVersion: job.Version, preview: cloneManifestPreview(preview)}
 	s.previewMu.Unlock()
-	return preview, nil
+	return cloneManifestPreview(preview), nil
+}
+
+// cloneManifestPreview returns a preview whose slice fields own independent
+// backing arrays, so callers cannot mutate cached entries through the returned
+// value and corrupt subsequent queries for the same job version.
+func cloneManifestPreview(p domain.ManifestPreview) domain.ManifestPreview {
+	if p.Items != nil {
+		items := make([]domain.ManifestPreviewItem, len(p.Items))
+		copy(items, p.Items)
+		p.Items = items
+	}
+	if p.Blockers != nil {
+		blockers := make([]domain.ManifestBlocker, len(p.Blockers))
+		copy(blockers, p.Blockers)
+		p.Blockers = blockers
+	}
+	return p
 }
 func (s *Service) AuditTimeline(ctx context.Context, jobID string) []domain.AuditEntry {
 	snap := s.store.Snapshot(ctx)
