@@ -50,12 +50,24 @@ func (s *Service) GetJob(ctx context.Context, id string) (JobDetail, error) {
 	s.jobDetailCalls[id] = call
 	s.queryMu.Unlock()
 
-	call.detail, call.err = s.loadJobDetail(ctx, id)
-	s.queryMu.Lock()
-	delete(s.jobDetailCalls, id)
-	close(call.done)
-	s.queryMu.Unlock()
-	return call.detail, call.err
+	go func() {
+		// Shared detail loading is decoupled from any single requester's
+		// context so that cancelling one waiter cannot abort or pollute the
+		// read other waiters are observing. The load always runs to
+		// completion against an independent context.
+		call.detail, call.err = s.loadJobDetail(context.Background(), id)
+		s.queryMu.Lock()
+		delete(s.jobDetailCalls, id)
+		close(call.done)
+		s.queryMu.Unlock()
+	}()
+
+	select {
+	case <-call.done:
+		return call.detail, call.err
+	case <-ctx.Done():
+		return JobDetail{}, ctx.Err()
+	}
 }
 
 func (s *Service) loadJobDetail(ctx context.Context, id string) (JobDetail, error) {
