@@ -222,6 +222,8 @@ func certificateVerificationCacheKey(number, code string) string {
 }
 
 func (s *Service) cachedCertificateVerification(key string) (CertificateVerification, bool) {
+	s.certificateVerificationCacheLock.RLock()
+	defer s.certificateVerificationCacheLock.RUnlock()
 	entry, ok := s.certificateVerificationCache[key]
 	if !ok {
 		return CertificateVerification{}, false
@@ -232,6 +234,8 @@ func (s *Service) cachedCertificateVerification(key string) (CertificateVerifica
 }
 
 func (s *Service) rememberCertificateVerification(key string, certificate domain.ReleaseCertificate, manifest domain.DeliveryManifest) CertificateVerification {
+	s.certificateVerificationCacheLock.Lock()
+	defer s.certificateVerificationCacheLock.Unlock()
 	s.certificateVerificationCache[key] = certificateVerificationCacheEntry{Certificate: certificate, Manifest: manifest}
 	return CertificateVerification{Valid: true, Certificate: &certificate, Manifest: &manifest}
 }

@@ -6,14 +6,16 @@ import (
 	"encoding/hex"
 	"fmt"
 	"strings"
+	"sync"
 	"tapemastergate/internal/domain"
 )
 
 type Service struct {
-	store                        Store
-	clock                        Clock
-	ids                          IDGenerator
-	certificateVerificationCache map[string]certificateVerificationCacheEntry
+	store                            Store
+	clock                            Clock
+	ids                              IDGenerator
+	certificateVerificationCache     map[string]certificateVerificationCacheEntry
+	certificateVerificationCacheLock sync.RWMutex
 }
 type randomIDs struct{}
 
