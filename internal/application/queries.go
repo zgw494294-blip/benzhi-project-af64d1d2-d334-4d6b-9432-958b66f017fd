@@ -195,25 +195,14 @@ func (s *Service) ManifestPreview(ctx context.Context, jobID string) (domain.Man
 	return domain.BuildManifestPreview(job, snap.JobCarriers(jobID), snap.JobCaptures(jobID), snap.JobFindings(jobID), revision), nil
 }
 func (s *Service) AuditTimeline(ctx context.Context, jobID string) []domain.AuditEntry {
-	s.auditCacheMu.RLock()
-	if cached, ok := s.auditCache[jobID]; ok {
-		out := append([]domain.AuditEntry(nil), cached...)
-		s.auditCacheMu.RUnlock()
-		return out
-	}
-	s.auditCacheMu.RUnlock()
-
 	snap := s.store.Snapshot(ctx)
-	var out []domain.AuditEntry
+	out := make([]domain.AuditEntry, 0, len(snap.Audits))
 	for _, a := range snap.Audits {
 		if a.JobID == jobID {
 			out = append(out, a)
 		}
 	}
-	s.auditCacheMu.Lock()
-	s.auditCache[jobID] = append([]domain.AuditEntry(nil), out...)
-	s.auditCacheMu.Unlock()
-	return append([]domain.AuditEntry(nil), out...)
+	return out
 }
 
 type CertificateVerification struct {
