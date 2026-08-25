@@ -10,9 +10,10 @@ import (
 )
 
 type Service struct {
-	store Store
-	clock Clock
-	ids   IDGenerator
+	store        Store
+	clock        Clock
+	ids          IDGenerator
+	eventScratch []Event
 }
 type randomIDs struct{}
 
@@ -27,6 +28,17 @@ func NewService(store Store) *Service {
 }
 func NewServiceWithDependencies(store Store, clock Clock, ids IDGenerator) *Service {
 	return &Service{store: store, clock: clock, ids: ids}
+}
+
+func (s *Service) beginEventBatch(first Event) []Event {
+	s.eventScratch = s.eventScratch[:0]
+	s.eventScratch = append(s.eventScratch, first)
+	return s.eventScratch
+}
+
+func (s *Service) appendEventBatch(event Event) []Event {
+	s.eventScratch = append(s.eventScratch, event)
+	return s.eventScratch
 }
 
 func requireMeta(m Meta, roles ...string) error {
@@ -107,12 +119,12 @@ func (s *Service) AddCarrier(ctx context.Context, c AddCarrierCommand) (CommitRe
 	}
 	job.Version++
 	job.UpdatedAt = s.clock.Now()
-	events := []Event{NewEvent("carrier.added", c.JobID, c.Actor, job.UpdatedAt, carrier)}
+	events := s.beginEventBatch(NewEvent("carrier.added", c.JobID, c.Actor, job.UpdatedAt, carrier))
 	if job.Status == domain.StatusReady {
 		job.Status = domain.StatusDraft
-		events = append(events, NewEvent("preflight.invalidated", c.JobID, c.Actor, job.UpdatedAt, struct{}{}))
+		events = s.appendEventBatch(NewEvent("preflight.invalidated", c.JobID, c.Actor, job.UpdatedAt, struct{}{}))
 	}
-	events = append(events, NewEvent("job.status_changed", c.JobID, c.Actor, job.UpdatedAt, job))
+	events = s.appendEventBatch(NewEvent("job.status_changed", c.JobID, c.Actor, job.UpdatedAt, job))
 	r := CommitResult{JobID: c.JobID, Version: job.Version, Status: job.Status, ResourceID: carrier.ID}
 	return s.store.Commit(ctx, c.JobID, c.ExpectedVersion, c.IdempotencyKey, events, r)
 }
@@ -165,7 +177,8 @@ func (s *Service) CompletePreflight(ctx context.Context, c CompletePreflightComm
 		JobID string                `json:"jobId"`
 		Check domain.PreflightCheck `json:"check"`
 	}{c.JobID, check}
-	events := []Event{NewEvent("preflight.completed", c.JobID, c.Actor, check.CheckedAt, data), NewEvent("job.status_changed", c.JobID, c.Actor, check.CheckedAt, job)}
+	events := s.beginEventBatch(NewEvent("preflight.completed", c.JobID, c.Actor, check.CheckedAt, data))
+	events = s.appendEventBatch(NewEvent("job.status_changed", c.JobID, c.Actor, check.CheckedAt, job))
 	r := CommitResult{JobID: c.JobID, Version: job.Version, Status: job.Status, Preflight: &check}
 	return s.store.Commit(ctx, c.JobID, c.ExpectedVersion, c.IdempotencyKey, events, r)
 }
@@ -372,7 +385,8 @@ func (s *Service) VoidCapture(ctx context.Context, c VoidCaptureCommand) (Commit
 	}
 	job.Version++
 	job.UpdatedAt = now
-	events := []Event{NewEvent("capture.voided", c.JobID, c.Actor, now, take), NewEvent("job.status_changed", c.JobID, c.Actor, now, job)}
+	events := s.beginEventBatch(NewEvent("capture.voided", c.JobID, c.Actor, now, take))
+	events = s.appendEventBatch(NewEvent("job.status_changed", c.JobID, c.Actor, now, job))
 	r := CommitResult{JobID: c.JobID, Version: job.Version, Status: job.Status, ResourceID: take.ID}
 	return s.store.Commit(ctx, c.JobID, c.ExpectedVersion, c.IdempotencyKey, events, r)
 }
@@ -409,7 +423,8 @@ func (s *Service) AddManualFinding(ctx context.Context, c AddFindingCommand) (Co
 	}
 	job.Version++
 	job.UpdatedAt = now
-	events := []Event{NewEvent("finding.created", c.JobID, c.Actor, now, f), NewEvent("job.status_changed", c.JobID, c.Actor, now, job)}
+	events := s.beginEventBatch(NewEvent("finding.created", c.JobID, c.Actor, now, f))
+	events = s.appendEventBatch(NewEvent("job.status_changed", c.JobID, c.Actor, now, job))
 	r := CommitResult{JobID: c.JobID, Version: job.Version, Status: job.Status, ResourceID: f.ID}
 	return s.store.Commit(ctx, c.JobID, c.ExpectedVersion, c.IdempotencyKey, events, r)
 }
@@ -503,7 +518,8 @@ func (s *Service) ReviewFinding(ctx context.Context, c ReviewFindingCommand) (Co
 	f.ReviewHistory = append(f.ReviewHistory, domain.FindingReviewRecord{Round: f.RemediationRound, Decision: c.Decision, Note: strings.TrimSpace(c.ResolutionNote), Reviewer: c.Actor, CaptureID: current.ID, ReviewedAt: now})
 	job.Version++
 	job.UpdatedAt = now
-	events := []Event{NewEvent("finding.reviewed", c.JobID, c.Actor, now, f), NewEvent("job.status_changed", c.JobID, c.Actor, now, job)}
+	events := s.beginEventBatch(NewEvent("finding.reviewed", c.JobID, c.Actor, now, f))
+	events = s.appendEventBatch(NewEvent("job.status_changed", c.JobID, c.Actor, now, job))
 	r := CommitResult{JobID: c.JobID, Version: job.Version, Status: job.Status, ResourceID: f.ID}
 	return s.store.Commit(ctx, c.JobID, c.ExpectedVersion, c.IdempotencyKey, events, r)
 }
@@ -588,7 +604,8 @@ func (s *Service) FreezeManifest(ctx context.Context, c FreezeManifestCommand) (
 	}
 	job.Version++
 	job.UpdatedAt = now
-	events := []Event{NewEvent("manifest.frozen", c.JobID, c.Actor, now, manifest), NewEvent("job.status_changed", c.JobID, c.Actor, now, job)}
+	events := s.beginEventBatch(NewEvent("manifest.frozen", c.JobID, c.Actor, now, manifest))
+	events = s.appendEventBatch(NewEvent("job.status_changed", c.JobID, c.Actor, now, job))
 	r := CommitResult{JobID: c.JobID, Version: job.Version, Status: job.Status, ResourceID: manifest.ID}
 	return s.store.Commit(ctx, c.JobID, c.ExpectedVersion, c.IdempotencyKey, events, r)
 }
@@ -627,7 +644,8 @@ func (s *Service) IssueCertificate(ctx context.Context, c IssueCertificateComman
 	}
 	job.Version++
 	job.UpdatedAt = now
-	events := []Event{NewEvent("certificate.issued", c.JobID, c.Actor, now, cert), NewEvent("job.status_changed", c.JobID, c.Actor, now, job)}
+	events := s.beginEventBatch(NewEvent("certificate.issued", c.JobID, c.Actor, now, cert))
+	events = s.appendEventBatch(NewEvent("job.status_changed", c.JobID, c.Actor, now, job))
 	r := CommitResult{JobID: c.JobID, Version: job.Version, Status: job.Status, ResourceID: cert.CertificateNo}
 	return s.store.Commit(ctx, c.JobID, c.ExpectedVersion, c.IdempotencyKey, events, r)
 }
