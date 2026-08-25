@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>TapeMaster Gate · 磁带母版放行</title>
+  <link rel="stylesheet" href="/app.css">
+</head>
+<body>
+  <header class="topbar">
+    <div><span class="eyebrow">声音档案数字化</span><h1>TapeMaster Gate</h1></div>
+    <div class="identity"><label>当前操作人<input id="actor" value="档案员"></label><label>角色<select id="role"><option value="operator">采集员</option><option value="reviewer">审校员</option><option value="manager">负责人</option></select></label></div>
+  </header>
+  <div id="notice" class="notice" role="status" aria-live="polite"></div>
+  <main>
+    <aside class="sidebar">
+      <button id="newJob" class="primary">＋ 新建数字化作业</button>
+      <h2>作业列表</h2><div id="jobs" class="job-list"></div>
+    </aside>
+    <section class="workspace">
+      <div id="empty" class="empty"><div class="reel">◉</div><h2>选择或创建一个数字化作业</h2><p>从载体建档开始，沿着唯一的质量放行流程推进。</p></div>
+      <div id="jobView" hidden>
+        <div class="job-head"><div><span id="collection" class="eyebrow"></span><h2 id="title"></h2></div><div><span id="status" class="status"></span><span id="version" class="version"></span></div></div>
+        <nav class="steps" aria-label="放行流程"><span>01 建档前检</span><span>02 采集质检</span><span>03 缺陷整改</span><span>04 冻结发证</span></nav>
+        <div class="grid">
+          <section class="panel" id="archivePanel"><h3>01 · 载体建档与前检</h3><div id="profile"></div><div id="carriers"></div><div class="actions"><button data-action="addCarrier">登记载体</button><button data-action="preflight">完成前置检查</button></div></section>
+          <section class="panel" id="capturePanel"><h3>02 · 参数化采集</h3><div id="captures"></div><div class="actions"><button data-action="capture">登记采集</button><button data-action="voidCapture">作废采集</button></div></section>
+          <section class="panel" id="findingPanel"><h3>03 · 质量发现与整改</h3><div class="filters"><select id="filterSeverity" aria-label="按严重级别筛选"><option value="">全部级别</option><option value="critical">critical</option><option value="major">major</option><option value="minor">minor</option><option value="info">info</option></select><select id="filterSource" aria-label="按来源筛选"><option value="">全部来源</option><option value="rule">规则</option><option value="manual">人工</option></select><select id="filterCarrier" aria-label="按载体筛选"><option value="">全部载体</option></select></div><div id="findings"></div><div class="actions"><button data-action="finding">补充人工发现</button><button data-action="review">复核发现</button><button data-action="submit">提交批准</button></div></section>
+          <section class="panel" id="releasePanel"><h3>04 · 冻结清单与凭据</h3><div id="release"></div><div class="actions"><button data-action="preview">生成冻结预检</button><button data-action="freeze">确认预检并冻结</button><button data-action="issue">签发交付凭据</button><button data-action="verify">验证凭据</button></div></section>
+        </div>
+        <section class="panel audit"><h3>完整状态审计时间线</h3><button data-action="audit">刷新时间线</button><ol id="audit"></ol></section>
+      </div>
+    </section>
+  </main>
+  <dialog id="dialog"><form id="actionForm"><div class="dialog-head"><h2 id="dialogTitle"></h2><button type="button" id="closeDialog" aria-label="关闭">×</button></div><div id="fields"></div><div class="dialog-actions"><button type="button" id="cancelDialog">取消</button><button class="primary" type="submit">确认提交</button></div></form></dialog>
+  <script src="/app.js" defer></script>
+</body>
+</html>
