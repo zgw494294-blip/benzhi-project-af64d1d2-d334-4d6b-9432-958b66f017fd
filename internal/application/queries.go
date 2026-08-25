@@ -188,11 +188,21 @@ func (s *Service) ManifestPreview(ctx context.Context, jobID string) (domain.Man
 	if err != nil {
 		return domain.ManifestPreview{}, err
 	}
+	s.previewMu.RLock()
+	cached, ok := s.manifestCache[jobID]
+	s.previewMu.RUnlock()
+	if ok && cached.jobVersion == job.Version {
+		return cached.preview, nil
+	}
 	revision := 1
 	if old, exists := snap.Manifests[jobID]; exists {
 		revision = old.Revision + 1
 	}
-	return domain.BuildManifestPreview(job, snap.JobCarriers(jobID), snap.JobCaptures(jobID), snap.JobFindings(jobID), revision), nil
+	preview := domain.BuildManifestPreview(job, snap.JobCarriers(jobID), snap.JobCaptures(jobID), snap.JobFindings(jobID), revision)
+	s.previewMu.Lock()
+	s.manifestCache[jobID] = cachedManifestPreview{jobVersion: job.Version, preview: preview}
+	s.previewMu.Unlock()
+	return preview, nil
 }
 func (s *Service) AuditTimeline(ctx context.Context, jobID string) []domain.AuditEntry {
 	snap := s.store.Snapshot(ctx)
