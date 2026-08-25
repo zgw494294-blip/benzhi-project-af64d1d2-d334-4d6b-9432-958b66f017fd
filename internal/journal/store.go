@@ -119,7 +119,7 @@ func (s *Store) IdempotentResult(_ context.Context, key string) (application.Com
 	return v, ok
 }
 
-func (s *Store) Commit(_ context.Context, jobID string, expected int64, key string, events []application.Event, result application.CommitResult) (application.CommitResult, error) {
+func (s *Store) Commit(ctx context.Context, jobID string, expected int64, key string, events []application.Event, result application.CommitResult) (application.CommitResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
@@ -148,6 +148,9 @@ func (s *Store) Commit(_ context.Context, jobID string, expected int64, key stri
 		return application.CommitResult{}, err
 	}
 	if err = s.file.Sync(); err != nil {
+		return application.CommitResult{}, err
+	}
+	if err = ctx.Err(); err != nil {
 		return application.CommitResult{}, err
 	}
 	next := s.projection.Clone()
