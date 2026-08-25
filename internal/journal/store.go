@@ -16,6 +16,33 @@ import (
 
 var ErrChecksum = errors.New("事件帧校验和不匹配")
 
+var appendFileCache = struct {
+	sync.Mutex
+	files map[string]*os.File
+}{files: map[string]*os.File{}}
+
+func openAppendFile(path string) (*os.File, error) {
+	appendFileCache.Lock()
+	defer appendFileCache.Unlock()
+	if file := appendFileCache.files[path]; file != nil {
+		return file, nil
+	}
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
+	if err != nil {
+		return nil, err
+	}
+	appendFileCache.files[path] = file
+	return file, nil
+}
+
+func forgetAppendFile(path string, file *os.File) {
+	appendFileCache.Lock()
+	defer appendFileCache.Unlock()
+	if appendFileCache.files[path] == file {
+		delete(appendFileCache.files, path)
+	}
+}
+
 type Store struct {
 	mu                           sync.RWMutex
 	dir, logPath, checkpointPath string
@@ -48,7 +75,7 @@ func Open(dir string) (*Store, error) {
 	if err = validateProjection(s.projection); err != nil {
 		return nil, fmt.Errorf("事件投影完整性校验失败: %w", err)
 	}
-	s.file, err = os.OpenFile(s.logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
+	s.file, err = openAppendFile(s.logPath)
 	if err != nil {
 		return nil, err
 	}
@@ -178,5 +205,6 @@ func (s *Store) Close() error {
 	if s.file == nil {
 		return nil
 	}
+	forgetAppendFile(s.logPath, s.file)
 	return s.file.Close()
 }
