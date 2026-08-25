@@ -36,7 +36,16 @@ func Open(dir string) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err = s.replay(); err != nil {
+	if cp.Sequence > 0 {
+		s.projection = cp.Projection.Clone()
+		s.idempotency = make(map[string]application.CommitResult, len(cp.Idempotency))
+		for key, result := range cp.Idempotency {
+			s.idempotency[key] = result
+		}
+		s.sequence = cp.Sequence
+		s.lastDigest = cp.LastDigest
+	}
+	if err = s.replay(cp.Sequence); err != nil {
 		return nil, err
 	}
 	if cp.Sequence > s.sequence {
@@ -55,7 +64,7 @@ func Open(dir string) (*Store, error) {
 	return s, nil
 }
 
-func (s *Store) replay() error {
+func (s *Store) replay(checkpointSequence int64) error {
 	b, err := os.ReadFile(s.logPath)
 	if os.IsNotExist(err) {
 		return nil
@@ -85,6 +94,11 @@ func (s *Store) replay() error {
 		}
 		if f.Sequence != seq+1 {
 			return fmt.Errorf("事件日志序号不连续: 期望 %d，得到 %d", seq+1, f.Sequence)
+		}
+		if f.Sequence <= checkpointSequence {
+			seq = f.Sequence
+			previous = f.Checksum
+			continue
 		}
 		if f.PreviousDigest != previous {
 			return fmt.Errorf("事件日志第 %d 帧前序摘要不匹配", i+1)
