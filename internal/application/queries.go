@@ -20,6 +20,12 @@ type JobDetail struct {
 	NextActions     []string                       `json:"nextActions"`
 }
 
+type jobDetailCall struct {
+	done   chan struct{}
+	detail JobDetail
+	err    error
+}
+
 func (s *Service) ListJobs(ctx context.Context) []domain.DigitizationJob {
 	snap := s.store.Snapshot(ctx)
 	out := make([]domain.DigitizationJob, 0, len(snap.Jobs))
@@ -30,6 +36,29 @@ func (s *Service) ListJobs(ctx context.Context) []domain.DigitizationJob {
 	return out
 }
 func (s *Service) GetJob(ctx context.Context, id string) (JobDetail, error) {
+	s.queryMu.Lock()
+	if call, ok := s.jobDetailCalls[id]; ok {
+		s.queryMu.Unlock()
+		select {
+		case <-call.done:
+			return call.detail, call.err
+		case <-ctx.Done():
+			return JobDetail{}, ctx.Err()
+		}
+	}
+	call := &jobDetailCall{done: make(chan struct{})}
+	s.jobDetailCalls[id] = call
+	s.queryMu.Unlock()
+
+	call.detail, call.err = s.loadJobDetail(ctx, id)
+	s.queryMu.Lock()
+	delete(s.jobDetailCalls, id)
+	close(call.done)
+	s.queryMu.Unlock()
+	return call.detail, call.err
+}
+
+func (s *Service) loadJobDetail(ctx context.Context, id string) (JobDetail, error) {
 	snap := s.store.Snapshot(ctx)
 	job, err := getJob(snap, id)
 	if err != nil {
