@@ -212,7 +212,35 @@ type CertificateVerification struct {
 	Reason      string                     `json:"reason,omitempty"`
 }
 
+type certificateVerificationCacheEntry struct {
+	Certificate domain.ReleaseCertificate
+	Manifest    domain.DeliveryManifest
+}
+
+func certificateVerificationCacheKey(number, code string) string {
+	return number + "\x00" + code
+}
+
+func (s *Service) cachedCertificateVerification(key string) (CertificateVerification, bool) {
+	entry, ok := s.certificateVerificationCache[key]
+	if !ok {
+		return CertificateVerification{}, false
+	}
+	certificate := entry.Certificate
+	manifest := entry.Manifest
+	return CertificateVerification{Valid: true, Certificate: &certificate, Manifest: &manifest}, true
+}
+
+func (s *Service) rememberCertificateVerification(key string, certificate domain.ReleaseCertificate, manifest domain.DeliveryManifest) CertificateVerification {
+	s.certificateVerificationCache[key] = certificateVerificationCacheEntry{Certificate: certificate, Manifest: manifest}
+	return CertificateVerification{Valid: true, Certificate: &certificate, Manifest: &manifest}
+}
+
 func (s *Service) VerifyCertificate(ctx context.Context, number, code string) CertificateVerification {
+	cacheKey := certificateVerificationCacheKey(number, code)
+	if verification, ok := s.cachedCertificateVerification(cacheKey); ok {
+		return verification
+	}
 	snap := s.store.Snapshot(ctx)
 	cert, ok := snap.Certificates[number]
 	if !ok {
@@ -225,5 +253,5 @@ func (s *Service) VerifyCertificate(ctx context.Context, number, code string) Ce
 	if !ok || manifest.ID != cert.ManifestID || manifest.ManifestDigest != cert.ManifestDigest {
 		return CertificateVerification{Reason: "凭据与冻结清单不一致"}
 	}
-	return CertificateVerification{Valid: true, Certificate: &cert, Manifest: &manifest}
+	return s.rememberCertificateVerification(cacheKey, cert, manifest)
 }

@@ -10,9 +10,10 @@ import (
 )
 
 type Service struct {
-	store Store
-	clock Clock
-	ids   IDGenerator
+	store                        Store
+	clock                        Clock
+	ids                          IDGenerator
+	certificateVerificationCache map[string]certificateVerificationCacheEntry
 }
 type randomIDs struct{}
 
@@ -23,10 +24,20 @@ func (randomIDs) NewID(prefix string) string {
 }
 
 func NewService(store Store) *Service {
-	return &Service{store: store, clock: realClock{}, ids: randomIDs{}}
+	return &Service{
+		store:                        store,
+		clock:                        realClock{},
+		ids:                          randomIDs{},
+		certificateVerificationCache: make(map[string]certificateVerificationCacheEntry),
+	}
 }
 func NewServiceWithDependencies(store Store, clock Clock, ids IDGenerator) *Service {
-	return &Service{store: store, clock: clock, ids: ids}
+	return &Service{
+		store:                        store,
+		clock:                        clock,
+		ids:                          ids,
+		certificateVerificationCache: make(map[string]certificateVerificationCacheEntry),
+	}
 }
 
 func requireMeta(m Meta, roles ...string) error {
