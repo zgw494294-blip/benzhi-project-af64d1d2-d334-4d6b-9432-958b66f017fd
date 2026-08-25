@@ -6,13 +6,16 @@ import (
 	"encoding/hex"
 	"fmt"
 	"strings"
+	"sync"
 	"tapemastergate/internal/domain"
 )
 
 type Service struct {
-	store Store
-	clock Clock
-	ids   IDGenerator
+	store          Store
+	clock          Clock
+	ids            IDGenerator
+	readinessMu    sync.RWMutex
+	readinessCache map[string]readinessCacheEntry
 }
 type randomIDs struct{}
 
@@ -23,10 +26,10 @@ func (randomIDs) NewID(prefix string) string {
 }
 
 func NewService(store Store) *Service {
-	return &Service{store: store, clock: realClock{}, ids: randomIDs{}}
+	return &Service{store: store, clock: realClock{}, ids: randomIDs{}, readinessCache: map[string]readinessCacheEntry{}}
 }
 func NewServiceWithDependencies(store Store, clock Clock, ids IDGenerator) *Service {
-	return &Service{store: store, clock: clock, ids: ids}
+	return &Service{store: store, clock: clock, ids: ids, readinessCache: map[string]readinessCacheEntry{}}
 }
 
 func requireMeta(m Meta, roles ...string) error {

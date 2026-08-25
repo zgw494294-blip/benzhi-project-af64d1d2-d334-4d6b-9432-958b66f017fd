@@ -19,11 +19,35 @@ type ReadinessReport struct {
 	NextActions         []string                  `json:"nextActions"`
 }
 
+type readinessCacheEntry struct {
+	version int64
+	report  ReadinessReport
+}
+
+func (s *Service) cachedReadiness(jobID string, version int64) (ReadinessReport, bool) {
+	s.readinessMu.RLock()
+	defer s.readinessMu.RUnlock()
+	entry, ok := s.readinessCache[jobID]
+	if !ok || entry.version != version {
+		return ReadinessReport{}, false
+	}
+	return entry.report, true
+}
+
+func (s *Service) rememberReadiness(report ReadinessReport) {
+	s.readinessMu.Lock()
+	defer s.readinessMu.Unlock()
+	s.readinessCache[report.JobID] = readinessCacheEntry{version: report.Version, report: report}
+}
+
 func (s *Service) Readiness(ctx context.Context, jobID string) (ReadinessReport, error) {
 	snap := s.store.Snapshot(ctx)
 	job, err := getJob(snap, jobID)
 	if err != nil {
 		return ReadinessReport{}, err
+	}
+	if report, ok := s.cachedReadiness(jobID, job.Version); ok {
+		return report, nil
 	}
 	profileValid := domain.ValidateProfile(job.CaptureProfile) == nil
 	preflightCheck, hasPreflight := snap.Preflights[jobID]
@@ -36,5 +60,6 @@ func (s *Service) Readiness(ctx context.Context, jobID string) (ReadinessReport,
 	report.CanRegisterCapture = job.Status == domain.StatusReady || job.Status == domain.StatusCapturing || job.Status == domain.StatusRemediation
 	report.CanFreeze = job.Status == domain.StatusPendingApproval && assessment.Allowed
 	report.CanIssueCertificate = job.Status == domain.StatusFrozen
+	s.rememberReadiness(report)
 	return report, nil
 }
